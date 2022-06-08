@@ -1,6 +1,6 @@
 version(1);
 
-project_name = "Origin";
+project_name = "ak_std";
 
 patterns =
 {

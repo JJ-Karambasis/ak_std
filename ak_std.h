@@ -468,8 +468,8 @@ uint32_t AK_Hash_Function(const ak_str8& Str);
 
 #ifndef AK_STD_ASSERT
 #include <assert.h>
-#define AK_STD_ASSERT(condition, message_) assert(condition)
-#endif
+#define AK_STD_ASSERT(condition, message) assert(condition)
+#endif //AK_STD_ASSERT
 
 #define AK__Max(a, b) ((a) > (b) ? (a) : (b))
 #define AK__Min(a, b) ((a) < (b) ? (a) : (b))
@@ -1661,7 +1661,7 @@ void ak_pool<type, bucket_capacity>::Free(uint64_t TempID)
         ak__pool_id ID = {TempID};
         ak__pool_entry<type>* Entry = &Data[ID.Index];
         
-        bool IsHead = ID.Index == FirstAllocatedIndex;
+        int32_t IsHead = ID.Index == FirstAllocatedIndex;
         if(!IsHead)
         {
             AK_STD_ASSERT(Entry->ID.PreviousIndex != AK__INVALID_POOL_INDEX, "Cannot be the head of the pool and have a valid previous index");
