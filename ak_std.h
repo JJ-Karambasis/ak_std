@@ -24,6 +24,9 @@
 #include <stdint.h>
 #include <stdarg.h>
 
+typedef void* ak_malloc(size_t Size, uint64_t UserData);
+typedef void  ak_free(void* Memory, uint64_t UserData);
+
 //~Raii definition
 template <typename type>
 struct ak_raii
@@ -34,6 +37,12 @@ struct ak_raii
     ak_raii(type* Resource);
     void Block();
     void Unblock();
+    
+    type* operator->()
+    {
+        return ManagedResource;
+    }
+    
     ~ak_raii();
 };
 
@@ -41,6 +50,13 @@ struct ak_buffer
 {
     uint8_t* Data;
     uint64_t Length;
+};
+
+struct ak_allocator
+{
+    uint64_t   UserData;
+    ak_malloc* Alloc;
+    ak_free*   Free;
 };
 
 //~Linked list macros
@@ -122,12 +138,13 @@ struct ak_arena_marker
     uint64_t Marker;
 };
 
-struct ak_arena
+struct ak_arena : public ak_allocator
 {
+    ak_allocator*    Allocator;
     ak__arena_block* FirstBlock;  
     ak__arena_block* CurrentBlock;
     ak__arena_block* LastBlock;
-    uint64_t     InitialBlockSize;
+    uint64_t         InitialBlockSize;
     
     ak_buffer Push(uint64_t Size, uint64_t Alignment, ak_arena_clear_flag ClearFlag = AK_ARENA_CLEAR);
     ak_buffer Push(uint64_t Size, ak_arena_clear_flag ClearFlag = AK_ARENA_CLEAR);
@@ -157,13 +174,15 @@ struct ak_temp_arena
     ~ak_temp_arena();
 };
 
-ak_arena* AK_Create_Arena(uint64_t InitialBlockSize = AK_ARENA_INITIAL_BLOCK_SIZE);
+ak_arena* AK_Create_Arena(uint64_t InitialBlockSize = AK_ARENA_INITIAL_BLOCK_SIZE, ak_allocator* Allocator = NULL);
 void AK_Delete(ak_arena* Arena);
+void* operator new(size_t Size, ak_arena* Arena);
 
 //~Dynamic Array definition
 template <typename type>
 struct ak_dynamic_array : public ak_array<type>
 {
+    ak_allocator* Allocator = NULL;
     uint64_t Capacity = 0;
     
     bool Add(const type& Entry);
@@ -174,7 +193,8 @@ struct ak_dynamic_array : public ak_array<type>
     bool Resize(uint64_t NewLength);
 };
 
-template <typename type> ak_dynamic_array<type> AK_Create_Dynamic_Array(uint64_t InitialCapacity = AK_DYNAMIC_ARRAY_INITIAL_CAPACITY);
+template <typename type> ak_dynamic_array<type> AK_Create_Dynamic_Array(uint64_t InitialCapacity = AK_DYNAMIC_ARRAY_INITIAL_CAPACITY, 
+                                                                        ak_allocator* Allocator = NULL);
 template <typename type> void AK_Delete(ak_dynamic_array<type>* Array);
 
 //~Bucket array definition
@@ -203,6 +223,7 @@ struct ak_bucket_array_iterator
 template <typename type, uint64_t bucket_capacity = AK_ARRAY_BUCKET_INITIAL_CAPACITY>
 struct ak_bucket_array
 {
+    ak_allocator* Allocator = NULL;
     ak_arena* Storage = NULL;
     ak_dynamic_array<ak__bucket<type, bucket_capacity>*> Buckets = {};
     uint64_t CurrentBucketIndex = 0;
@@ -265,6 +286,7 @@ struct ak_hashmap_iterator
 template <typename key, typename value>
 struct ak_hashmap
 {
+    ak_allocator* Allocator = NULL;
     uint32_t Length = 0;
     uint32_t SlotCapacity = 0;
     uint32_t ItemCapacity = 0;
@@ -284,7 +306,8 @@ struct ak_hashmap
 };
 
 template <typename key, typename value> ak_hashmap<key, value>
-AK_Create_Hash_Map(uint32_t InitialSlotCapacity=AK_HASH_MAP_INITIAL_SLOT_CAPACITY, uint32_t InitialItemCapacity=AK_HASH_MAP_INITIAL_ITEM_CAPACITY);
+AK_Create_Hash_Map(uint32_t InitialSlotCapacity=AK_HASH_MAP_INITIAL_SLOT_CAPACITY, uint32_t InitialItemCapacity=AK_HASH_MAP_INITIAL_ITEM_CAPACITY,
+                   ak_allocator* Allocator = NULL);
 
 template <typename key, typename value> void
 AK_Delete(ak_hashmap<key, value>* HashMap);
@@ -443,7 +466,7 @@ ak_str8 AK_Str8(const char* First, const char* Last);
 #define AK_Str8_Lit(s) AK_Str8((const char*)s, sizeof(s)-1)
 ak_str8_list AK_Str8_Split(const ak_str8& String, ak_arena* Arena, char* SplitChars, uint32_t CharCount);
 ak_str8 AK_Str8_FormatV(ak_arena* Arena, const char* Format, va_list Args);
-ak_str8 AK_Str8_FormatV(ak_arena* Arena, const char* Format, ...);
+ak_str8 AK_Str8_Format(ak_arena* Arena, const char* Format, ...);
 
 bool operator!=(const ak_str8& A, const ak_str8& B);
 bool operator==(const ak_str8& A, const ak_str8& B);
@@ -489,21 +512,21 @@ void AK__Memory_Clear(void* Dest, size_t Size)
     AK_STD_MEMSET(Dest, 0, Size);
 }
 
-void* AK__Malloc(size_t Size)
-{
-    return AK_STD_MALLOC(Size);
-}
-
-void AK__Free(void* Memory)
-{
-    if(Memory) AK_STD_FREE(Memory);
-}
-
 uint64_t AK__Memory_Align(uint64_t Value, uint64_t Alignment)
 {
     Alignment = Alignment ? Alignment : 1;
     uint64_t Mod = Value & (Alignment-1);
     return Mod ? Value + (Alignment-Mod) : Value;
+}
+
+void* AK__Alloc(size_t Size, uint64_t UserData)
+{
+    return AK_STD_MALLOC(Size);
+}
+
+void AK__Free(void* Memory, uint64_t UserData)
+{
+    if(Memory) AK_STD_FREE(Memory);
 }
 
 uint64_t AK__Ceil_Pow2(uint64_t V)
@@ -518,6 +541,14 @@ uint64_t AK__Ceil_Pow2(uint64_t V)
     ++V;
     V += ( V == 0 );    
     return V;
+}
+
+ak_allocator* AK__Get_Default_Allocator()
+{
+    static ak_allocator Allocator;
+    Allocator.Alloc = AK__Alloc;
+    Allocator.Free = AK__Free;
+    return &Allocator;
 }
 
 //~Array implementation
@@ -613,9 +644,9 @@ struct ak__arena_block
     ak__arena_block* Next;
 };
 
-ak__arena_block* AK__Arena_Allocate_Block(uint64_t BlockSize)
+ak__arena_block* AK__Arena_Allocate_Block(uint64_t BlockSize, ak_allocator* Allocator)
 {
-    ak__arena_block* Block = (ak__arena_block*)AK__Malloc(sizeof(ak__arena_block)+BlockSize);
+    ak__arena_block* Block = (ak__arena_block*)Allocator->Alloc(sizeof(ak__arena_block)+BlockSize, Allocator->UserData);
     if(!Block)
     {
         //TODO(JJ): Diagnostic and error logging
@@ -652,9 +683,21 @@ ak__arena_block* AK__Arena_Get_Block(ak_arena* Arena, uint64_t Size, uint64_t Al
     return Block;
 }
 
+void* AK__Arena_Alloc(size_t Size, uint64_t UserData)
+{
+    ak_arena* Arena = (ak_arena*)UserData;
+    return Arena->Push(Size).Data;
+}
+
+void AK__Arena_Free(void* Memory, uint64_t UserData)
+{
+    
+}
+
 ak_buffer ak_arena::Push(uint64_t Size, uint64_t Alignment, ak_arena_clear_flag ClearFlag)
 {
     if(!Size) return {};
+    if(!Allocator) Allocator = AK__Get_Default_Allocator();
     
     ak__arena_block* Block = AK__Arena_Get_Block(this, Size, Alignment);
     if(!Block)
@@ -663,7 +706,7 @@ ak_buffer ak_arena::Push(uint64_t Size, uint64_t Alignment, ak_arena_clear_flag 
         if(Size > BlockSize)
             BlockSize = (Alignment) ? AK__Memory_Align(Size, Alignment) : Size;
         
-        Block = AK__Arena_Allocate_Block(BlockSize);
+        Block = AK__Arena_Allocate_Block(BlockSize, Allocator);
         if(!Block)
         {
             //TODO(JJ): Diagnostic and error logging
@@ -797,9 +840,11 @@ ak_temp_arena::~ak_temp_arena()
     End_Temp();
 }
 
-ak_arena* AK_Create_Arena(uint64_t InitialBlockSize)
+ak_arena* AK_Create_Arena(uint64_t InitialBlockSize, ak_allocator* Allocator)
 {
-    void* Memory = AK__Malloc(InitialBlockSize + sizeof(ak_arena)+sizeof(ak__arena_block));
+    if(!Allocator) Allocator = AK__Get_Default_Allocator();
+    
+    void* Memory = Allocator->Alloc(InitialBlockSize + sizeof(ak_arena)+sizeof(ak__arena_block), Allocator->UserData);
     if(!Memory) 
     {
         //TODO(JJ): Diagnostic and error logging
@@ -808,11 +853,19 @@ ak_arena* AK_Create_Arena(uint64_t InitialBlockSize)
     
     ak_arena* Result = (ak_arena*)Memory;
     Result->InitialBlockSize = InitialBlockSize;
+    Result->Allocator = Allocator;
     
     ak__arena_block* Block = (ak__arena_block*)(Result+1);
     AK__Memory_Clear(Block, sizeof(ak__arena_block));
     Block->Memory = (uint8_t*)(Block+1);
+    Block->Size = InitialBlockSize;
+    Block->Used = 0;
     AK__Arena_Add_Block(Result, Block);
+    Result->CurrentBlock = Block;
+    
+    Result->Alloc = AK__Arena_Alloc;
+    Result->Free = AK__Arena_Free;
+    Result->UserData = (uint64_t)Result;
     
     return Result;
 }
@@ -827,11 +880,16 @@ void AK_Delete(ak_arena* Arena)
         {
             ak__arena_block* BlockToDelete = Block;
             Block = Block->Next;
-            AK__Free(BlockToDelete);
+            Arena->Allocator->Free(BlockToDelete, Arena->Allocator->UserData);
         }
         
-        AK__Memory_Clear(Arena, sizeof(ak_arena));
+        Arena->Allocator->Free(Arena, Arena->Allocator->UserData);
     }
+}
+
+void* operator new(size_t Size, ak_arena* Arena)
+{
+    return Arena->Push(Size).Data;
 }
 
 //~Dynamic Array implementation
@@ -897,9 +955,11 @@ bool ak_dynamic_array<type>::Add_Range(const type* Start, const type* End)
 template <typename type>
 bool ak_dynamic_array<type>::Reserve(uint64_t NewCapacity)
 {
+    if(!Allocator) Allocator = AK__Get_Default_Allocator();
+    
     if(NewCapacity < Length) NewCapacity = Length;
     
-    type* NewData = (type*)AK__Malloc(NewCapacity*sizeof(type));
+    type* NewData = (type*)Allocator->Alloc(NewCapacity*sizeof(type), Allocator->UserData);
     if(!NewData)
     {
         //TODO(JJ): Error handling
@@ -910,7 +970,7 @@ bool ak_dynamic_array<type>::Reserve(uint64_t NewCapacity)
     {
         uint64_t CopySize = Capacity > NewCapacity ? NewCapacity : Capacity;
         AK__Memory_Copy(NewData, Data, CopySize*sizeof(type));
-        AK__Free(Data);
+        Allocator->Free(Data, Allocator->UserData);
     }
     
     Data = NewData;
@@ -935,9 +995,10 @@ bool ak_dynamic_array<type>::Resize(uint64_t NewLength)
 }
 
 template <typename type> 
-ak_dynamic_array<type> AK_Dynamic_Create_Array(uint64_t InitialCapacity)
+ak_dynamic_array<type> AK_Dynamic_Create_Array(uint64_t InitialCapacity, ak_allocator* Allocator)
 {
     ak_dynamic_array<type> Result;
+    Result.Allocator = Allocator;
     Result.Reserve(InitialCapacity);
     return Result;
 }
@@ -947,7 +1008,7 @@ void AK_Delete(ak_dynamic_array<type>* Array)
 {
     if(Array && Array->Data)
     {
-        AK__Free(Array->Data);
+        Array->Allocator->Free(Array->Data, Array->Allocator->UserData);
         AK__Memory_Clear(Array, sizeof(ak_dynamic_array<type>));
     }
 }
@@ -980,6 +1041,22 @@ void ak_bucket_array_iterator<type, bucket_capacity>::operator++()
 template <typename type, uint64_t bucket_capacity>
 ak__bucket<type, bucket_capacity>* AK__Array_Get_Current_Bucket(ak_bucket_array<type, bucket_capacity>* Array)
 {
+    if(!Array->Allocator) 
+    {
+        Array->Allocator = AK__Get_Default_Allocator();
+        Array->Buckets.Allocator = Array->Allocator;
+    }
+    
+    if(!Array->Storage)
+    {
+        Array->Storage = AK_Create_Arena(AK_ARENA_INITIAL_BLOCK_SIZE, Array->Allocator);
+        if(!Array->Storage)
+        {
+            //TODO(JJ): Diagnostic and error logging
+            return NULL;
+        }
+    }
+    
     if(Array->CurrentBucketIndex == Array->Buckets.Length)
     {
         ak__bucket<type, bucket_capacity>* Bucket = Array->Storage->Push_Struct<ak__bucket<type, bucket_capacity>>();
@@ -998,16 +1075,6 @@ ak__bucket<type, bucket_capacity>* AK__Array_Get_Current_Bucket(ak_bucket_array<
 template <typename type, uint64_t bucket_capacity>
 bool ak_bucket_array<type, bucket_capacity>::Add(const type& Entry)
 {
-    if(!Storage)
-    {
-        Storage = AK_Create_Arena();
-        if(!Storage)
-        {
-            //TODO(JJ): Diagnostic and error logging
-            return false;
-        }
-    }
-    
     ak__bucket<type, bucket_capacity>* CurrentBucket = AK__Array_Get_Current_Bucket(this);
     if(!CurrentBucket)
     {
@@ -1169,12 +1236,14 @@ template <typename type, uint64_t bucket_capacity>
 ak_bucket_array<type, bucket_capacity> ak_bucket_array<type, bucket_capacity>::Copy()
 {
     ak_bucket_array<type, bucket_capacity> Result;
-    Result.Storage = AK_Create_Arena();
+    Result.Allocator = Allocator;
+    Result.Storage = AK_Create_Arena(AK_ARENA_INITIAL_BLOCK_SIZE, Allocator);
     if(!Result.Storage)
     {
         //TODO(JJ): Diagnostic and error logging
         return {};
     }
+    Result.Buckets.Allocator = Allocator;
     
     ak_raii<ak_bucket_array  <type, bucket_capacity>> RAII(&Result);
     Result.Buckets.Resize(Buckets.Length);
@@ -1252,12 +1321,13 @@ bool ak_hashmap_iterator<key, value>::operator!=(const ak_hashmap_iterator& Iter
     return CurrentIndex != HashMap->Length;
 }
 
-ak__hashmap_slot* AK__HashMap_Realloc_Slots(ak__hashmap_slot* OldSlots, uint32_t* ItemSlots, uint32_t OldCapacity, uint32_t NewCapacity)
+ak__hashmap_slot* AK__HashMap_Realloc_Slots(ak__hashmap_slot* OldSlots, uint32_t* ItemSlots, uint32_t OldCapacity, uint32_t NewCapacity, 
+                                            ak_allocator* Allocator)
 {
     uint32_t SlotMask = NewCapacity-1;
     
     uint64_t AllocSize = NewCapacity*sizeof(ak__hashmap_slot);
-    ak__hashmap_slot* Slots = (ak__hashmap_slot*)AK__Malloc(AllocSize);
+    ak__hashmap_slot* Slots = (ak__hashmap_slot*)Allocator->Alloc(AllocSize, Allocator->UserData);
     AK__Memory_Clear(Slots, AllocSize);
     
     for(uint32_t OldSlotIndex = 0; OldSlotIndex < OldCapacity; OldSlotIndex++)
@@ -1278,7 +1348,7 @@ ak__hashmap_slot* AK__HashMap_Realloc_Slots(ak__hashmap_slot* OldSlots, uint32_t
         }
     }
     
-    AK__Free(OldSlots);
+    Allocator->Free(OldSlots, Allocator->UserData);
     return Slots;
 }
 
@@ -1287,8 +1357,10 @@ void AK__HashMap_Realloc(ak_hashmap<key, value>* Map)
 {
     Map->ItemCapacity *= 2;
     
+    ak_allocator* Allocator = Map->Allocator;
+    
     uint64_t AllocSize = Map->ItemCapacity * (sizeof(key) + sizeof(value) + sizeof(uint32_t));
-    void* MapData = AK__Malloc(AllocSize);        
+    void* MapData = Allocator->Alloc(AllocSize, Allocator->UserData);        
     AK__Memory_Clear(MapData, AllocSize);
     
     uint32_t* NewItemSlots = (uint32_t*)MapData;
@@ -1298,7 +1370,7 @@ void AK__HashMap_Realloc(ak_hashmap<key, value>* Map)
     AK__Memory_Copy(NewItemSlots, Map->ItemSlots, Map->Length*sizeof(uint32_t));
     AK__Memory_Copy(NewKeys, Map->Keys, Map->Length*sizeof(key));
     AK__Memory_Copy(NewValues, Map->Values, Map->Length*sizeof(value));
-    AK__Free(Map->ItemSlots);
+    Allocator->Free(Map->ItemSlots, Allocator->UserData);
     
     Map->ItemSlots = NewItemSlots;
     Map->Keys = NewKeys;
@@ -1347,7 +1419,7 @@ void ak_hashmap<key, value>::Add(const key& Key, const value& Value)
     {
         uint32_t OldCapacity = SlotCapacity;
         SlotCapacity = (uint32_t)AK__Ceil_Pow2(SlotCapacity*2);
-        Slots = AK__HashMap_Realloc_Slots(Slots, ItemSlots, OldCapacity, SlotCapacity);
+        Slots = AK__HashMap_Realloc_Slots(Slots, ItemSlots, OldCapacity, SlotCapacity, Allocator);
     }
     
     uint32_t SlotMask = SlotCapacity-1;
@@ -1461,16 +1533,19 @@ ak_hashmap_iterator<key, value> ak_hashmap<key, value>::end() const
 }
 
 template <typename key, typename value> 
-ak_hashmap<key, value>  AK_Create_Hash_Map(uint32_t InitialSlotCapacity, uint32_t InitialItemCapacity)
+ak_hashmap<key, value>  AK_Create_Hash_Map(uint32_t InitialSlotCapacity, uint32_t InitialItemCapacity, ak_allocator* Allocator)
 {
+    if(!Allocator) Allocator = AK__Get_Default_Allocator();
+    
     ak_hashmap<key, value> Result = {};
+    Result.Allocator = Allocator;
     Result.SlotCapacity = (uint32_t)AK__Ceil_Pow2(InitialSlotCapacity);
     Result.ItemCapacity = InitialItemCapacity;
     
-    Result.Slots = (ak__hashmap_slot*)AK__Malloc(sizeof(ak__hashmap_slot)*Result.SlotCapacity);
+    Result.Slots = (ak__hashmap_slot*)Allocator->Alloc(sizeof(ak__hashmap_slot)*Result.SlotCapacity, Allocator->UserData);
     
     size_t AllocationSize = Result.ItemCapacity * (sizeof(key) + sizeof(value) + sizeof(uint32_t));
-    void* MapData = AK__Malloc(AllocationSize);
+    void* MapData = Allocator->Alloc(AllocationSize, Allocator->UserData);
     
     Result.ItemSlots = (uint32_t*)MapData;
     Result.Keys = (key*)(Result.ItemSlots + Result.ItemCapacity);
@@ -1483,12 +1558,12 @@ ak_hashmap<key, value>  AK_Create_Hash_Map(uint32_t InitialSlotCapacity, uint32_
 }
 
 template <typename key, typename value>
-ak_hashmap<key, value> AK_Delete(ak_hashmap<key, value>* HashMap)
+void AK_Delete(ak_hashmap<key, value>* HashMap)
 {
     if(HashMap)
     {
-        AK__Free(HashMap->Slots);
-        AK__Free(HashMap->ItemSlots);
+        HashMap->Allocator->Free(HashMap->Slots, HashMap->Allocator->UserData);
+        HashMap->Allocator->Free(HashMap->ItemSlots, HashMap->Allocator->UserData);
     }
 }
 
@@ -1744,7 +1819,7 @@ void AK_Delete(ak_pool<type, bucket_capacity>* Pool)
     if(Pool)
     {
         AK_Delete(&Pool->Data);
-        AK__Memory_Clear(Pool, sizeof(ak_pool<type, bucket_capacity, id, index>));
+        AK__Memory_Clear(Pool, sizeof(ak_pool<type, bucket_capacity>));
     }
 }
 
@@ -3956,13 +4031,12 @@ ak_str8 AK_Str8_FormatV(ak_arena* Arena, const char* Format, va_list Args)
     int ActualSize = stbsp_vsnprintf(NULL, 0, Format, Args);
     
     ak_array<char> Result = Arena->Push_Array<char>(ActualSize+1);
-    stbsp_vsnprintf(Result.Data, ActualSize, Format, Args);
-    Result[ActualSize] = 0;
+    stbsp_vsnprintf(Result.Data, ActualSize+1, Format, Args);
     
     return AK_Str8(Result.Data, ActualSize);
 }
 
-ak_str8 AK_Str8_FormatV(ak_arena* Arena, const char* Format, ...)
+ak_str8 AK_Str8_Format(ak_arena* Arena, const char* Format, ...)
 {
     va_list Args;
     va_start(Args, Format);
