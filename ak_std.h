@@ -115,8 +115,13 @@ struct ak_array
     
     void Clear();
     
+    ak_array<type> Copy(struct ak_arena* Arena);
+    
     type* begin();
     type* end();
+    
+    const type* begin() const;
+    const type* end() const;
 };
 
 #define AK_Expand_Array(array) (array), sizeof((array))/sizeof((array)[0])
@@ -178,6 +183,29 @@ ak_arena* AK_Create_Arena(uint64_t InitialBlockSize = AK_ARENA_INITIAL_BLOCK_SIZ
 void AK_Delete(ak_arena* Arena);
 void* operator new(size_t Size, ak_arena* Arena);
 
+//~Heap definition
+#if 0
+struct ak_heap : public ak_allocator
+{
+    ak_arena* Arena;
+    
+    ak_buffer Alloc(uint64_t Size, uint64_t Alignment, ak_clear_flag ClearFlag = AK_CLEAR);
+    ak_buffer Alloc(uint64_t Size, ak_clear_flag ClearFlag = AK_CLEAR);
+    
+    template <typename> type* Alloc_Struct(uint64_t Alignment, ak_clear_flag ClearFlag = AK_CLEAR);
+    template <typename> type* Alloc_Struct(ak_clear_flag ClearFlag = AK_CLEAR);
+    
+    template <typename> ak_array<type> Alloc_Array(uint64_t Count, uint64_t Alignment, ak_clear_flag ClearFlag = AK_CLEAR);
+    template <typename> ak_array<type> Alloc_Array(uint64_t Count, ak_clear_flag ClearFlag = AK_CLEAR);
+    
+    void Free(void* Memory);
+    void Clear(ak_clear_flag ClearFlag);
+};
+
+ak_heap AK_Create_Heap(uint64_t ArenaBlockSize = AK_ARENA_INITIAL_BLOCK_SIZE, ak_allocator* Allocator = NULL);
+void AK_Delete(ak_heap* Heap);
+void* operator new(size_t Size, ak_heap* Heap);
+#endif
 //~Dynamic Array definition
 template <typename type>
 struct ak_dynamic_array : public ak_array<type>
@@ -409,6 +437,8 @@ bool AK_Is_Newline(char Code);
 bool AK_Is_Whitespace(char Code);
 uint64_t AK_CStr_Length(const char* Str);
 
+//TODO(JJ): ak_str16 and ak_str32
+
 struct ak_str8
 {
     const char* Str;
@@ -467,6 +497,8 @@ ak_str8 AK_Str8(const char* First, const char* Last);
 ak_str8_list AK_Str8_Split(const ak_str8& String, ak_arena* Arena, char* SplitChars, uint32_t CharCount);
 ak_str8 AK_Str8_FormatV(ak_arena* Arena, const char* Format, va_list Args);
 ak_str8 AK_Str8_Format(ak_arena* Arena, const char* Format, ...);
+
+//TODO(JJ): UTF8 functions
 
 bool operator!=(const ak_str8& A, const ak_str8& B);
 bool operator==(const ak_str8& A, const ak_str8& B);
@@ -588,6 +620,14 @@ void ak_array<type>::Clear()
 }
 
 template <typename type>
+ak_array<type> ak_array<type>::Copy(ak_arena* Arena)
+{
+    ak_array<type> Result = Arena->Push_Array<type>(Length);
+    AK__Memory_Copy(Result.Data, Data, Length*sizeof(type));
+    return Result;
+}
+
+template <typename type>
 type* ak_array<type>::begin()
 {
     return Data;
@@ -595,6 +635,18 @@ type* ak_array<type>::begin()
 
 template <typename type>
 type* ak_array<type>::end()
+{
+    return Data + Length;
+}
+
+template <typename type>
+const type* ak_array<type>::begin() const
+{
+    return Data;
+}
+
+template <typename type>
+const type* ak_array<type>::end() const
 {
     return Data + Length;
 }
